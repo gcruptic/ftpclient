@@ -33,9 +33,11 @@ jobs:
           # 2. build.gradle.kts (root)
           echo 'plugins { id("com.android.application") version "8.2.2" apply false; id("org.jetbrains.kotlin.android") version "1.9.22" apply false }' > build.gradle.kts
 
-          # 3. gradle.properties
+          # 3. gradle.properties (Увеличение RAM для компилятора)
           echo 'android.useAndroidX=true' > gradle.properties
           echo 'android.nonTransitiveRClass=true' >> gradle.properties
+          echo 'org.gradle.jvmargs=-Xmx3072m -XX:MaxMetaspaceSize=512m' >> gradle.properties
+          echo 'org.gradle.daemon=false' >> gradle.properties
 
           # 4. app/build.gradle.kts
           cat << 'EOF' > app/build.gradle.kts
@@ -92,7 +94,7 @@ jobs:
           # 5. Clean AndroidManifest.xml
           printf '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <application android:allowBackup="true" android:label="FTP Client" android:supportsRtl="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">\n        <activity android:name=".MainActivity" android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.LAUNCHER" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n' > app/src/main/AndroidManifest.xml
 
-          # 6. MainActivity.kt (Исправленный код без ненайденных импортов)
+          # 6. MainActivity.kt
           cat << 'EOF' > app/src/main/java/com/example/ftpclient/MainActivity.kt
           package com.example.ftpclient
 
