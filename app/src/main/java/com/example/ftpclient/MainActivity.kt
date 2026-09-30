@@ -1,0 +1,532 @@
+package com.example.ftpclient
+
+import android.content.Context
+import android.net.Uri
+import android.os.Bundle
+import android.os.Environment
+import android.provider.OpenableColumns
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import com.journeyapps.zxing.scan.ScanContract
+import com.journeyapps.zxing.scan.ScanOptions
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.apache.commons.net.ftp.FTP
+import org.apache.commons.net.ftp.FTPClient
+import org.apache.commons.net.ftp.FTPFile
+import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
+import java.net.URI
+
+data class FtpConfig(
+    val host: String = "",
+    val port: Int = 21,
+    val user: String = "anonymous",
+    val pass: String = ""
+)
+
+class FtpManager {
+    private val ftpClient = FTPClient()
+
+    suspend fun connect(config: FtpConfig): Boolean = withContext(Dispatchers.IO) {
+        try {
+            ftpClient.connect(config.host, config.port)
+            val success = ftpClient.login(config.user, config.pass)
+            if (success) {
+                ftpClient.enterLocalPassiveMode()
+                ftpClient.setFileType(FTP.BINARY_FILE_TYPE)
+            }
+            success
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    suspend fun listFiles(path: String = "/"): List<FTPFile> = withContext(Dispatchers.IO) {
+        try {
+            ftpClient.listFiles(path).toList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun downloadFile(
+        remoteFilePath: String,
+        destinationFile: File,
+        onProgress: (Float) -> Unit = {}
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val fileStream: OutputStream = FileOutputStream(destinationFile)
+            val files = ftpClient.listFiles(remoteFilePath)
+            val fileSize = if (files.isNotEmpty()) files[0].size else -1L
+
+            val success = if (fileSize > 0) {
+                val countingStream = object : OutputStream() {
+                    var totalBytesRead = 0L
+                    override fun write(b: Int) {
+                        fileStream.write(b)
+                        totalBytesRead++
+                        onProgress(totalBytesRead.toFloat() / fileSize)
+                    }
+                    override fun write(b: ByteArray, off: Int, len: Int) {
+                        fileStream.write(b, off, len)
+                        totalBytesRead += len
+                        onProgress(totalBytesRead.toFloat() / fileSize)
+                    }
+                    override fun flush() = fileStream.flush()
+                    override fun close() = fileStream.close()
+                }
+                ftpClient.retrieveFile(remoteFilePath, countingStream)
+            } else {
+                ftpClient.retrieveFile(remoteFilePath, fileStream)
+            }
+            fileStream.close()
+            success
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    suspend fun uploadFile(
+        context: Context,
+        fileUri: Uri,
+        remoteDirPath: String,
+        onProgress: (Float) -> Unit = {}
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val contentResolver = context.contentResolver
+            var fileName = "uploaded_file"
+            var fileSize = -1L
+
+            contentResolver.query(fileUri, null, null, null, null)?.use { cursor ->
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (cursor.moveToFirst()) {
+                    if (nameIndex != -1) fileName = cursor.getString(nameIndex)
+                    if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
+                }
+            }
+
+            val remoteFilePath = if (remoteDirPath.endsWith("/")) {
+                "$remoteDirPath$fileName"
+            } else {
+                "$remoteDirPath/$fileName"
+            }
+
+            ftpClient.setFileType(FTP.BINARY_FILE_TYPE)
+
+            contentResolver.openInputStream(fileUri)?.use { inputStream ->
+                val outputStream: OutputStream = ftpClient.storeFileStream(remoteFilePath)
+                    ?: return@withContext false
+
+                val buffer = ByteArray(4096)
+                var bytesRead: Int
+                var totalBytesUploaded = 0L
+
+                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    outputStream.write(buffer, 0, bytesRead)
+                    totalBytesUploaded += bytesRead
+                    if (fileSize > 0) {
+                        onProgress(totalBytesUploaded.toFloat() / fileSize)
+                    }
+                }
+
+                outputStream.flush()
+                outputStream.close()
+                ftpClient.completePendingCommand()
+            } ?: false
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    fun disconnect() {
+        if (ftpClient.isConnected) {
+            try {
+                ftpClient.logout()
+                ftpClient.disconnect()
+            } catch (_: Exception) {}
+        }
+    }
+
+    companion object {
+        fun parseQrCode(qrData: String): FtpConfig? {
+            return try {
+                val uri = URI(qrData)
+                if (uri.scheme == "ftp") {
+                    val userInfo = uri.userInfo?.split(":") ?: listOf("", "")
+                    FtpConfig(
+                        host = uri.host ?: "",
+                        port = if (uri.port != -1) uri.port else 21,
+                        user = userInfo.getOrNull(0) ?: "anonymous",
+                        pass = userInfo.getOrNull(1) ?: ""
+                    )
+                } else null
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+}
+
+class MainActivity : ComponentActivity() {
+    private val ftpManager = FtpManager()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            var isConnected by remember { mutableStateOf(false) }
+
+            MaterialTheme {
+                if (isConnected) {
+                    FtpFileListScreen(
+                        ftpManager = ftpManager,
+                        onDisconnect = { isConnected = false }
+                    )
+                } else {
+                    FtpConnectScreen(
+                        ftpManager = ftpManager,
+                        onConnected = { isConnected = true }
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        ftpManager.disconnect()
+    }
+}
+
+@Composable
+fun FtpConnectScreen(
+    ftpManager: FtpManager,
+    onConnected: () -> Unit
+) {
+    var host by remember { mutableStateOf("") }
+    var port by remember { mutableStateOf("21") }
+    var user by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
+    var isConnecting by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        if (result.contents != null) {
+            val parsedConfig = FtpManager.parseQrCode(result.contents)
+            if (parsedConfig != null) {
+                host = parsedConfig.host
+                port = parsedConfig.port.toString()
+                user = parsedConfig.user
+                pass = parsedConfig.pass
+            } else {
+                errorMsg = "Неверный формат QR-кода"
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("FTP Подключение", style = MaterialTheme.typography.headlineMedium)
+        Spacer(modifier = Modifier.height(16.dp))
+
+        OutlinedButton(
+            onClick = {
+                val options = ScanOptions().apply {
+                    setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    setPrompt("Наведите камеру на QR-код FTP")
+                    setBeepEnabled(false)
+                    setOrientationLocked(false)
+                }
+                qrLauncher.launch(options)
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Сканировать QR-код")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        OutlinedTextField(
+            value = host,
+            onValueChange = { host = it },
+            label = { Text("Хост / IP") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = port,
+            onValueChange = { port = it },
+            label = { Text("Порт") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = user,
+            onValueChange = { user = it },
+            label = { Text("Логин") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = pass,
+            onValueChange = { pass = it },
+            label = { Text("Пароль") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = {
+                scope.launch {
+                    isConnecting = true
+                    errorMsg = null
+                    val config = FtpConfig(
+                        host = host,
+                        port = port.toIntOrNull() ?: 21,
+                        user = user.ifEmpty { "anonymous" },
+                        pass = pass
+                    )
+                    val success = ftpManager.connect(config)
+                    isConnecting = false
+                    if (success) {
+                        onConnected()
+                    } else {
+                        errorMsg = "Ошибка подключения к серверу"
+                    }
+                }
+            },
+            enabled = !isConnecting && host.isNotEmpty(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (isConnecting) {
+                CircularProgressIndicator(size = 24.dp)
+            } else {
+                Text("Подключиться")
+            }
+        }
+
+        errorMsg?.let {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(it, color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FtpFileListScreen(
+    ftpManager: FtpManager,
+    onDisconnect: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var currentPath by remember { mutableStateOf("/") }
+    var fileList by remember { mutableStateOf<List<FTPFile>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    var downloadingFile by remember { mutableStateOf<String?>(null) }
+    var downloadProgress by remember { mutableFloatStateOf(0f) }
+
+    var isUploading by remember { mutableStateOf(false) }
+    var uploadProgress by remember { mutableFloatStateOf(0f) }
+
+    fun loadDirectory(path: String) {
+        scope.launch {
+            isLoading = true
+            fileList = ftpManager.listFiles(path)
+            currentPath = path
+            isLoading = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        loadDirectory("/")
+    }
+
+    BackHandler(enabled = currentPath != "/") {
+        val parentPath = currentPath.substringBeforeLast('/', "").ifEmpty { "/" }
+        loadDirectory(parentPath)
+    }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { selectedUri ->
+            scope.launch {
+                isUploading = true
+                uploadProgress = 0f
+
+                val success = ftpManager.uploadFile(
+                    context = context,
+                    fileUri = selectedUri,
+                    remoteDirPath = currentPath
+                ) { progress ->
+                    uploadProgress = progress
+                }
+
+                isUploading = false
+
+                if (success) {
+                    Toast.makeText(context, "Файл загружен!", Toast.LENGTH_SHORT).show()
+                    loadDirectory(currentPath)
+                } else {
+                    Toast.makeText(context, "Ошибка загрузки файла", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(text = currentPath, maxLines = 1) },
+                navigationIcon = {
+                    if (currentPath != "/") {
+                        IconButton(onClick = {
+                            val parentPath = currentPath.substringBeforeLast('/', "").ifEmpty { "/" }
+                            loadDirectory(parentPath)
+                        }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
+                        }
+                    }
+                },
+                actions = {
+                    IconButton(onClick = {
+                        scope.launch {
+                            ftpManager.disconnect()
+                            onDisconnect()
+                        }
+                    }) {
+                        Icon(Icons.Default.Logout, contentDescription = "Отключиться")
+                    }
+                }
+            )
+        },
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = { filePickerLauncher.launch("*/*") },
+                containerColor = MaterialTheme.colorScheme.primary
+            ) {
+                Icon(Icons.Default.Upload, contentDescription = "Загрузить")
+            }
+        }
+    ) { paddingValues ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            if (isLoading) {
+                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+            } else if (fileList.isEmpty()) {
+                Text(
+                    text = "Папка пуста",
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(fileList) { file ->
+                        ListItem(
+                            modifier = Modifier.clickable {
+                                if (file.isDirectory) {
+                                    val newPath = if (currentPath.endsWith("/")) {
+                                        "$currentPath${file.name}"
+                                    } else {
+                                        "$currentPath/${file.name}"
+                                    }
+                                    loadDirectory(newPath)
+                                }
+                            },
+                            headlineContent = { Text(file.name) },
+                            leadingContent = {
+                                Icon(
+                                    imageVector = if (file.isDirectory) Icons.Default.Folder else Icons.Default.InsertDriveFile,
+                                    contentDescription = null
+                                )
+                            },
+                            trailingContent = {
+                                if (!file.isDirectory) {
+                                    if (downloadingFile == file.name) {
+                                        CircularProgressIndicator(
+                                            progress = { downloadProgress },
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    } else {
+                                        IconButton(onClick = {
+                                            scope.launch {
+                                                downloadingFile = file.name
+                                                downloadProgress = 0f
+                                                val fullPath = if (currentPath.endsWith("/")) "$currentPath${file.name}" else "$currentPath/${file.name}"
+                                                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                                val destFile = File(downloadsDir, file.name)
+                                                val success = ftpManager.downloadFile(fullPath, destFile) { downloadProgress = it }
+                                                downloadingFile = null
+                                                Toast.makeText(context, if (success) "Сохранено в Downloads" else "Ошибка скачивания", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }) {
+                                            Icon(Icons.Default.Download, contentDescription = "Скачать")
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                        HorizontalDivider()
+                    }
+                }
+            }
+
+            if (isUploading) {
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(16.dp)
+                        .fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("Загрузка файла...")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            progress = { uploadProgress },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
