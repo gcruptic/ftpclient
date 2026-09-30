@@ -79,6 +79,7 @@ jobs:
               implementation("androidx.compose.ui:ui")
               implementation("androidx.compose.ui:ui-graphics")
               implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
               
               // FTP Client
               implementation("commons-net:commons-net:3.10.0")
@@ -88,10 +89,10 @@ jobs:
           }
           EOF
 
-          # 5. Clean AndroidManifest.xml с использованием системной темы Android
+          # 5. Clean AndroidManifest.xml
           printf '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n    <uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.CAMERA" />\n    <application android:allowBackup="true" android:label="FTP Client" android:supportsRtl="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">\n        <activity android:name=".MainActivity" android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.LAUNCHER" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n' > app/src/main/AndroidManifest.xml
 
-          # 6. MainActivity.kt
+          # 6. MainActivity.kt (Исправленный код без ненайденных импортов)
           cat << 'EOF' > app/src/main/java/com/example/ftpclient/MainActivity.kt
           package com.example.ftpclient
 
@@ -112,11 +113,11 @@ jobs:
           import androidx.compose.foundation.lazy.items
           import androidx.compose.material.icons.Icons
           import androidx.compose.material.icons.automirrored.filled.ArrowBack
-          import androidx.compose.material.icons.filled.Download
+          import androidx.compose.material.icons.automirrored.filled.ExitToApp
+          import androidx.compose.material.icons.filled.FileDownload
+          import androidx.compose.material.icons.filled.FileUpload
           import androidx.compose.material.icons.filled.Folder
           import androidx.compose.material.icons.filled.InsertDriveFile
-          import androidx.compose.material.icons.filled.Logout
-          import androidx.compose.material.icons.filled.Upload
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
@@ -124,6 +125,7 @@ jobs:
           import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.unit.dp
           import com.journeyapps.zxing.scan.ScanContract
+          import com.journeyapps.zxing.scan.ScanIntentResult
           import com.journeyapps.zxing.scan.ScanOptions
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.launch
@@ -333,7 +335,7 @@ jobs:
               var errorMsg by remember { mutableStateOf<String?>(null) }
               val scope = rememberCoroutineScope()
 
-              val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+              val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result: ScanIntentResult ->
                   if (result.contents != null) {
                       val parsedConfig = FtpManager.parseQrCode(result.contents)
                       if (parsedConfig != null) {
@@ -425,7 +427,7 @@ jobs:
                       modifier = Modifier.fillMaxWidth()
                   ) {
                       if (isConnecting) {
-                          CircularProgressIndicator(size = 24.dp)
+                          CircularProgressIndicator(modifier = Modifier.size(24.dp))
                       } else {
                           Text("Подключиться")
                       }
@@ -524,7 +526,7 @@ jobs:
                                       onDisconnect()
                                   }
                               }) {
-                                  Icon(Icons.Default.Logout, contentDescription = "Отключиться")
+                                  Icon(Icons.AutoMirrored.Filled.ExitToApp, contentDescription = "Отключиться")
                               }
                           }
                       )
@@ -534,7 +536,7 @@ jobs:
                           onClick = { filePickerLauncher.launch("*/*") },
                           containerColor = MaterialTheme.colorScheme.primary
                       ) {
-                          Icon(Icons.Default.Upload, contentDescription = "Загрузить")
+                          Icon(Icons.Default.FileUpload, contentDescription = "Загрузить")
                       }
                   }
               ) { paddingValues ->
@@ -591,7 +593,7 @@ jobs:
                                                           Toast.makeText(context, if (success) "Сохранено в Downloads" else "Ошибка скачивания", Toast.LENGTH_SHORT).show()
                                                       }
                                                   }) {
-                                                      Icon(Icons.Default.Download, contentDescription = "Скачать")
+                                                      Icon(Icons.Default.FileDownload, contentDescription = "Скачать")
                                                   }
                                               }
                                           }
