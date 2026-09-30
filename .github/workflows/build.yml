@@ -94,7 +94,7 @@ jobs:
           # 5. AndroidManifest.xml
           printf '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n    <uses-permission android:name="android.permission.INTERNET" />\n    <application android:allowBackup="true" android:label="FTP Client" android:supportsRtl="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">\n        <activity android:name=".MainActivity" android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.LAUNCHER" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n' > app/src/main/AndroidManifest.xml
 
-          # 6. MainActivity.kt (с авто-переключением Passive/Active и зафиксированной UTF-8)
+          # 6. MainActivity.kt (с исправленными методами таймаута)
           cat << 'EOF' > app/src/main/java/com/example/ftpclient/MainActivity.kt
           package com.example.ftpclient
 
@@ -153,9 +153,11 @@ jobs:
 
               suspend fun connect(config: FtpConfig): Boolean = withContext(Dispatchers.IO) {
                   try {
+                      ftpClient.defaultTimeout = 10000
                       ftpClient.connectTimeout = 10000
-                      ftpClient.dataTimeout = 10000
                       ftpClient.connect(config.host, config.port)
+                      ftpClient.soTimeout = 10000
+                      
                       val success = ftpClient.login(config.user, config.pass)
                       if (success) {
                           ftpClient.controlEncoding = "UTF-8"
@@ -174,7 +176,6 @@ jobs:
               suspend fun listFiles(path: String = "/"): List<FTPFile> = withContext(Dispatchers.IO) {
                   try {
                       var files = ftpClient.listFiles(path).toList()
-                      // Если в пассивном режиме файлы не приволоклись, пробуем активный режим
                       if (files.isEmpty()) {
                           ftpClient.enterLocalActiveMode()
                           files = ftpClient.listFiles(path).toList()
