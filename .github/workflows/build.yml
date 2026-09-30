@@ -88,13 +88,16 @@ jobs:
               
               // Google Code Scanner (ML Kit)
               implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+
+              // Gson для сохранения истории подключений
+              implementation("com.google.code.gson:gson:2.10.1")
           }
           EOF
 
           # 5. AndroidManifest.xml
           printf '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n    <uses-permission android:name="android.permission.INTERNET" />\n    <application android:allowBackup="true" android:label="FTP Client" android:supportsRtl="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">\n        <activity android:name=".MainActivity" android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.MAIN" />\n                <category android:name="android.intent.category.LAUNCHER" />\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n' > app/src/main/AndroidManifest.xml
 
-          # 6. MainActivity.kt (универсальный парсинг листинга FTP)
+          # 6. MainActivity.kt (все новые фичи + сохранение истории)
           cat << 'EOF' > app/src/main/java/com/example/ftpclient/MainActivity.kt
           package com.example.ftpclient
 
@@ -110,22 +113,22 @@ jobs:
           import androidx.activity.compose.setContent
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.isSystemInDarkTheme
           import androidx.compose.foundation.layout.*
           import androidx.compose.foundation.lazy.LazyColumn
           import androidx.compose.foundation.lazy.items
           import androidx.compose.material.icons.Icons
           import androidx.compose.material.icons.automirrored.filled.ArrowBack
           import androidx.compose.material.icons.automirrored.filled.ExitToApp
-          import androidx.compose.material.icons.filled.FileDownload
-          import androidx.compose.material.icons.filled.FileUpload
-          import androidx.compose.material.icons.filled.Folder
-          import androidx.compose.material.icons.filled.InsertDriveFile
+          import androidx.compose.material.icons.filled.*
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.unit.dp
+          import com.google.gson.Gson
+          import com.google.gson.reflect.TypeToken
           import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
           import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
           import com.google.mlkit.vision.barcode.common.Barcode
@@ -141,11 +144,43 @@ jobs:
           import java.net.URI
 
           data class FtpConfig(
+              val name: String = "Новое подключение",
               val host: String = "",
               val port: Int = 21,
               val user: String = "anonymous",
               val pass: String = ""
           )
+
+          object HistoryManager {
+              private const val PREFS_NAME = "ftp_history_prefs"
+              private const val KEY_HISTORY = "history_list"
+              private val gson = Gson()
+
+              fun saveConnection(context: Context, config: FtpConfig) {
+                  val list = getHistory(context).toMutableList()
+                  list.removeAll { it.host == config.host && it.port == config.port && it.user == config.user }
+                  list.add(0, config)
+                  val json = gson.toJson(list)
+                  context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                      .edit().putString(KEY_HISTORY, json).apply()
+              }
+
+              fun getHistory(context: Context): List<FtpConfig> {
+                  val json = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                      .getString(KEY_HISTORY, null) ?: return emptyList()
+                  val type = object : TypeToken<List<FtpConfig>>() {}.type
+                  return try { gson.fromJson(json, type) } catch (e: Exception) { emptyList() }
+              }
+
+              fun deleteConnection(context: Context, config: FtpConfig): List<FtpConfig> {
+                  val list = getHistory(context).toMutableList()
+                  list.removeAll { it.host == config.host && it.port == config.port && it.user == config.user }
+                  val json = gson.toJson(list)
+                  context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                      .edit().putString(KEY_HISTORY, json).apply()
+                  return list
+              }
+          }
 
           class FtpManager {
               private val ftpClient = FTPClient()
@@ -162,8 +197,6 @@ jobs:
                           ftpClient.controlEncoding = "UTF-8"
                           ftpClient.enterLocalPassiveMode()
                           ftpClient.setFileType(FTP.BINARY_FILE_TYPE)
-                          
-                          // Отправляем UTF8 для серверов, поддерживающих опцию
                           ftpClient.sendCommand("OPTS UTF8 ON")
                       }
                       success
@@ -175,46 +208,39 @@ jobs:
 
               suspend fun listFiles(path: String = "/"): List<FTPFile> = withContext(Dispatchers.IO) {
                   try {
-                      if (path.isNotEmpty()) {
-                          ftpClient.changeWorkingDirectory(path)
-                      }
-                      
-                      // 1. Пробуем стандартный listFiles
+                      if (path.isNotEmpty()) ftpClient.changeWorkingDirectory(path)
                       var files = ftpClient.listFiles().toList()
-                      
-                      // 2. Если пустая папка — пробуем активный режим
                       if (files.isEmpty()) {
                           ftpClient.enterLocalActiveMode()
                           files = ftpClient.listFiles().toList()
                       }
-
-                      // 3. Если всё ещё пусто, пробуем MLSD
                       if (files.isEmpty()) {
                           ftpClient.enterLocalPassiveMode()
                           files = ftpClient.mlistDir().toList()
                       }
-
-                      // 4. Если ничего не помогло — собираем через listNames() как фоллбэк
                       if (files.isEmpty()) {
                           val names = ftpClient.listNames() ?: emptyArray()
                           files = names.map { name ->
                               val file = FTPFile()
                               file.name = name
-                              // Предполагаем директорию, если нет расширения точки
-                              if (!name.contains(".")) {
-                                  file.type = FTPFile.DIRECTORY_TYPE
-                              } else {
-                                  file.type = FTPFile.FILE_TYPE
-                              }
+                              file.type = if (!name.contains(".")) FTPFile.DIRECTORY_TYPE else FTPFile.FILE_TYPE
                               file
                           }
                       }
-
                       files.filter { it.name != "." && it.name != ".." }
                   } catch (e: Exception) {
-                      e.printStackTrace()
                       emptyList()
                   }
+              }
+
+              suspend fun createDirectory(dirName: String): Boolean = withContext(Dispatchers.IO) {
+                  try { ftpClient.makeDirectory(dirName) } catch (e: Exception) { false }
+              }
+
+              suspend fun deleteItem(path: String, isDirectory: Boolean): Boolean = withContext(Dispatchers.IO) {
+                  try {
+                      if (isDirectory) ftpClient.removeDirectory(path) else ftpClient.deleteFile(path)
+                  } catch (e: Exception) { false }
               }
 
               suspend fun downloadFile(
@@ -250,7 +276,6 @@ jobs:
                       fileStream.close()
                       success
                   } catch (e: Exception) {
-                      e.printStackTrace()
                       false
                   }
               }
@@ -275,18 +300,11 @@ jobs:
                           }
                       }
 
-                      val remoteFilePath = if (remoteDirPath.endsWith("/")) {
-                          "$remoteDirPath$fileName"
-                      } else {
-                          "$remoteDirPath/$fileName"
-                      }
-
+                      val remoteFilePath = if (remoteDirPath.endsWith("/")) "$remoteDirPath$fileName" else "$remoteDirPath/$fileName"
                       ftpClient.setFileType(FTP.BINARY_FILE_TYPE)
 
                       contentResolver.openInputStream(fileUri)?.use { inputStream ->
-                          val outputStream: OutputStream = ftpClient.storeFileStream(remoteFilePath)
-                              ?: return@withContext false
-
+                          val outputStream: OutputStream = ftpClient.storeFileStream(remoteFilePath) ?: return@withContext false
                           val buffer = ByteArray(4096)
                           var bytesRead: Int
                           var totalBytesUploaded = 0L
@@ -294,17 +312,13 @@ jobs:
                           while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                               outputStream.write(buffer, 0, bytesRead)
                               totalBytesUploaded += bytesRead
-                              if (fileSize > 0) {
-                                  onProgress(totalBytesUploaded.toFloat() / fileSize)
-                              }
+                              if (fileSize > 0) onProgress(totalBytesUploaded.toFloat() / fileSize)
                           }
-
                           outputStream.flush()
                           outputStream.close()
                           ftpClient.completePendingCommand()
                       } ?: false
                   } catch (e: Exception) {
-                      e.printStackTrace()
                       false
                   }
               }
@@ -325,15 +339,14 @@ jobs:
                           if (uri.scheme == "ftp") {
                               val userInfo = uri.userInfo?.split(":") ?: listOf("", "")
                               FtpConfig(
+                                  name = uri.host ?: "FTP Server",
                                   host = uri.host ?: "",
                                   port = if (uri.port != -1) uri.port else 21,
                                   user = userInfo.getOrNull(0) ?: "anonymous",
                                   pass = userInfo.getOrNull(1) ?: ""
                               )
                           } else null
-                      } catch (e: Exception) {
-                          null
-                      }
+                      } catch (e: Exception) { null }
                   }
               }
           }
@@ -344,19 +357,32 @@ jobs:
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   setContent {
+                      val systemDark = isSystemInDarkTheme()
+                      var isDarkTheme by remember { mutableStateOf(systemDark) }
                       var isConnected by remember { mutableStateOf(false) }
 
-                      MaterialTheme {
-                          if (isConnected) {
-                              FtpFileListScreen(
-                                  ftpManager = ftpManager,
-                                  onDisconnect = { isConnected = false }
-                              )
-                          } else {
-                              FtpConnectScreen(
-                                  ftpManager = ftpManager,
-                                  onConnected = { isConnected = true }
-                              )
+                      val colorScheme = if (isDarkTheme) darkColorScheme() else lightColorScheme()
+
+                      MaterialTheme(colorScheme = colorScheme) {
+                          Surface(
+                              modifier = Modifier.fillMaxSize(),
+                              color = MaterialTheme.colorScheme.background
+                          ) {
+                              if (isConnected) {
+                                  FtpFileListScreen(
+                                      ftpManager = ftpManager,
+                                      isDarkTheme = isDarkTheme,
+                                      onToggleTheme = { isDarkTheme = !isDarkTheme },
+                                      onDisconnect = { isConnected = false }
+                                  )
+                              } else {
+                                  FtpConnectScreen(
+                                      ftpManager = ftpManager,
+                                      isDarkTheme = isDarkTheme,
+                                      onToggleTheme = { isDarkTheme = !isDarkTheme },
+                                      onConnected = { isConnected = true }
+                                  )
+                              }
                           }
                       }
                   }
@@ -371,6 +397,8 @@ jobs:
           @Composable
           fun FtpConnectScreen(
               ftpManager: FtpManager,
+              isDarkTheme: Boolean,
+              onToggleTheme: () -> Unit,
               onConnected: () -> Unit
           ) {
               val context = LocalContext.current
@@ -382,15 +410,30 @@ jobs:
               var errorMsg by remember { mutableStateOf<String?>(null) }
               val scope = rememberCoroutineScope()
 
+              var historyList by remember { mutableStateOf(HistoryManager.getHistory(context)) }
+
               Column(
                   modifier = Modifier
                       .fillMaxSize()
                       .padding(16.dp),
-                  verticalArrangement = Arrangement.Center,
+                  verticalArrangement = Arrangement.Top,
                   horizontalAlignment = Alignment.CenterHorizontally
               ) {
-                  Text("FTP Подключение", style = MaterialTheme.typography.headlineMedium)
-                  Spacer(modifier = Modifier.height(16.dp))
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.SpaceBetween,
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      Text("FTP Подключение", style = MaterialTheme.typography.headlineSmall)
+                      IconButton(onClick = onToggleTheme) {
+                          Icon(
+                              imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                              contentDescription = "Тема"
+                          )
+                      }
+                  }
+
+                  Spacer(modifier = Modifier.height(12.dp))
 
                   OutlinedButton(
                       onClick = {
@@ -405,48 +448,28 @@ jobs:
                                           port = parsedConfig.port.toString()
                                           user = parsedConfig.user
                                           pass = parsedConfig.pass
-                                      } else {
-                                          errorMsg = "Неверный формат QR-кода"
-                                      }
+                                      } else { errorMsg = "Неверный формат QR-кода" }
                                   }
                               }
-                              .addOnFailureListener {
-                                  errorMsg = "Ошибка сканирования"
-                              }
+                              .addOnFailureListener { errorMsg = "Ошибка сканирования" }
                       },
                       modifier = Modifier.fillMaxWidth()
                   ) {
+                      Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                      Spacer(modifier = Modifier.width(8.dp))
                       Text("Сканировать QR-код")
                   }
 
-                  Spacer(modifier = Modifier.height(16.dp))
+                  Spacer(modifier = Modifier.height(8.dp))
 
-                  OutlinedTextField(
-                      value = host,
-                      onValueChange = { host = it },
-                      label = { Text("Хост / IP") },
-                      modifier = Modifier.fillMaxWidth()
-                  )
-                  OutlinedTextField(
-                      value = port,
-                      onValueChange = { port = it },
-                      label = { Text("Порт") },
-                      modifier = Modifier.fillMaxWidth()
-                  )
-                  OutlinedTextField(
-                      value = user,
-                      onValueChange = { user = it },
-                      label = { Text("Логин") },
-                      modifier = Modifier.fillMaxWidth()
-                  )
-                  OutlinedTextField(
-                      value = pass,
-                      onValueChange = { pass = it },
-                      label = { Text("Пароль") },
-                      modifier = Modifier.fillMaxWidth()
-                  )
+                  OutlinedTextField(value = host, onValueChange = { host = it }, label = { Text("Хост / IP") }, modifier = Modifier.fillMaxWidth())
+                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      OutlinedTextField(value = port, onValueChange = { port = it }, label = { Text("Порт") }, modifier = Modifier.weight(1f))
+                      OutlinedTextField(value = user, onValueChange = { user = it }, label = { Text("Логин") }, modifier = Modifier.weight(2f))
+                  }
+                  OutlinedTextField(value = pass, onValueChange = { pass = it }, label = { Text("Пароль") }, modifier = Modifier.fillMaxWidth())
 
-                  Spacer(modifier = Modifier.height(16.dp))
+                  Spacer(modifier = Modifier.height(12.dp))
 
                   Button(
                       onClick = {
@@ -462,6 +485,7 @@ jobs:
                               val success = ftpManager.connect(config)
                               isConnecting = false
                               if (success) {
+                                  HistoryManager.saveConnection(context, config)
                                   onConnected()
                               } else {
                                   errorMsg = "Ошибка подключения к серверу"
@@ -471,16 +495,51 @@ jobs:
                       enabled = !isConnecting && host.isNotEmpty(),
                       modifier = Modifier.fillMaxWidth()
                   ) {
-                      if (isConnecting) {
-                          CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                      } else {
-                          Text("Подключиться")
-                      }
+                      if (isConnecting) CircularProgressIndicator(modifier = Modifier.size(24.dp)) else Text("Подключиться")
                   }
 
                   errorMsg?.let {
                       Spacer(modifier = Modifier.height(8.dp))
                       Text(it, color = MaterialTheme.colorScheme.error)
+                  }
+
+                  if (historyList.isNotEmpty()) {
+                      Spacer(modifier = Modifier.height(16.dp))
+                      HorizontalDivider()
+                      Spacer(modifier = Modifier.height(8.dp))
+                      Text("Сохраненные подключения", style = MaterialTheme.typography.titleMedium)
+                      Spacer(modifier = Modifier.height(8.dp))
+
+                      LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                          items(historyList) { item ->
+                              Card(
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .padding(vertical = 4.dp)
+                                      .clickable {
+                                          host = item.host
+                                          port = item.port.toString()
+                                          user = item.user
+                                          pass = item.pass
+                                      }
+                              ) {
+                                  Row(
+                                      modifier = Modifier
+                                          .fillMaxWidth()
+                                          .padding(12.dp),
+                                      horizontalArrangement = Arrangement.SpaceBetween,
+                                      verticalAlignment = Alignment.CenterVertically
+                                  ) {
+                                      Column {
+                                          Text("${item.user}@${item.host}:${item.port}", style = MaterialTheme.typography.bodyLarge)
+                                      }
+                                      IconButton(onClick = { historyList = HistoryManager.deleteConnection(context, item) }) {
+                                          Icon(Icons.Default.Delete, contentDescription = "Удалить")
+                                      }
+                                  }
+                              }
+                          }
+                      }
                   }
               }
           }
@@ -489,6 +548,8 @@ jobs:
           @Composable
           fun FtpFileListScreen(
               ftpManager: FtpManager,
+              isDarkTheme: Boolean,
+              onToggleTheme: () -> Unit,
               onDisconnect: () -> Unit
           ) {
               val context = LocalContext.current
@@ -504,6 +565,9 @@ jobs:
               var isUploading by remember { mutableStateOf(false) }
               var uploadProgress by remember { mutableFloatStateOf(0f) }
 
+              var showCreateDirDialog by remember { mutableStateOf(false) }
+              var newDirName by remember { mutableStateOf("") }
+
               fun loadDirectory(path: String) {
                   scope.launch {
                       isLoading = true
@@ -513,9 +577,7 @@ jobs:
                   }
               }
 
-              LaunchedEffect(Unit) {
-                  loadDirectory("/")
-              }
+              LaunchedEffect(Unit) { loadDirectory("/") }
 
               BackHandler(enabled = currentPath != "/") {
                   val parentPath = currentPath.substringBeforeLast('/', "").ifEmpty { "/" }
@@ -529,17 +591,8 @@ jobs:
                       scope.launch {
                           isUploading = true
                           uploadProgress = 0f
-
-                          val success = ftpManager.uploadFile(
-                              context = context,
-                              fileUri = selectedUri,
-                              remoteDirPath = currentPath
-                          ) { progress ->
-                              uploadProgress = progress
-                          }
-
+                          val success = ftpManager.uploadFile(context, selectedUri, currentPath) { uploadProgress = it }
                           isUploading = false
-
                           if (success) {
                               Toast.makeText(context, "Файл загружен!", Toast.LENGTH_SHORT).show()
                               loadDirectory(currentPath)
@@ -565,6 +618,15 @@ jobs:
                               }
                           },
                           actions = {
+                              IconButton(onClick = { showCreateDirDialog = true }) {
+                                  Icon(Icons.Default.CreateNewFolder, contentDescription = "Создать папку")
+                              }
+                              IconButton(onClick = onToggleTheme) {
+                                  Icon(
+                                      imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                      contentDescription = "Тема"
+                                  )
+                              }
                               IconButton(onClick = {
                                   scope.launch {
                                       ftpManager.disconnect()
@@ -585,31 +647,19 @@ jobs:
                       }
                   }
               ) { paddingValues ->
-                  Box(
-                      modifier = Modifier
-                          .fillMaxSize()
-                          .padding(paddingValues)
-                  ) {
+                  Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
                       if (isLoading) {
                           CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                       } else if (fileList.isEmpty()) {
-                          Text(
-                              text = "Папка пуста",
-                              modifier = Modifier.align(Alignment.Center)
-                          )
+                          Text(text = "Папка пуста", modifier = Modifier.align(Alignment.Center))
                       } else {
                           LazyColumn(modifier = Modifier.fillMaxSize()) {
                               items(fileList) { file ->
+                                  val itemPath = if (currentPath.endsWith("/")) "$currentPath${file.name}" else "$currentPath/${file.name}"
+                                  
                                   ListItem(
                                       modifier = Modifier.clickable {
-                                          if (file.isDirectory) {
-                                              val newPath = if (currentPath.endsWith("/")) {
-                                                  "$currentPath${file.name}"
-                                              } else {
-                                                  "$currentPath/${file.name}"
-                                              }
-                                              loadDirectory(newPath)
-                                          }
+                                          if (file.isDirectory) loadDirectory(itemPath)
                                       },
                                       headlineContent = { Text(file.name) },
                                       leadingContent = {
@@ -619,27 +669,38 @@ jobs:
                                           )
                                       },
                                       trailingContent = {
-                                          if (!file.isDirectory) {
-                                              if (downloadingFile == file.name) {
-                                                  CircularProgressIndicator(
-                                                      progress = { downloadProgress },
-                                                      modifier = Modifier.size(24.dp)
-                                                  )
-                                              } else {
-                                                  IconButton(onClick = {
-                                                      scope.launch {
-                                                          downloadingFile = file.name
-                                                          downloadProgress = 0f
-                                                          val fullPath = if (currentPath.endsWith("/")) "$currentPath${file.name}" else "$currentPath/${file.name}"
-                                                          val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                                                          val destFile = File(downloadsDir, file.name)
-                                                          val success = ftpManager.downloadFile(fullPath, destFile) { downloadProgress = it }
-                                                          downloadingFile = null
-                                                          Toast.makeText(context, if (success) "Сохранено в Downloads" else "Ошибка скачивания", Toast.LENGTH_SHORT).show()
+                                          Row {
+                                              if (!file.isDirectory) {
+                                                  if (downloadingFile == file.name) {
+                                                      CircularProgressIndicator(progress = { downloadProgress }, modifier = Modifier.size(24.dp))
+                                                  } else {
+                                                      IconButton(onClick = {
+                                                          scope.launch {
+                                                              downloadingFile = file.name
+                                                              downloadProgress = 0f
+                                                              val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                                              val destFile = File(downloadsDir, file.name)
+                                                              val success = ftpManager.downloadFile(itemPath, destFile) { downloadProgress = it }
+                                                              downloadingFile = null
+                                                              Toast.makeText(context, if (success) "Сохранено в Downloads" else "Ошибка скачивания", Toast.LENGTH_SHORT).show()
+                                                          }
+                                                      }) {
+                                                          Icon(Icons.Default.FileDownload, contentDescription = "Скачать")
                                                       }
-                                                  }) {
-                                                      Icon(Icons.Default.FileDownload, contentDescription = "Скачать")
                                                   }
+                                              }
+                                              IconButton(onClick = {
+                                                  scope.launch {
+                                                      val success = ftpManager.deleteItem(itemPath, file.isDirectory)
+                                                      if (success) {
+                                                          Toast.makeText(context, "Удалено", Toast.LENGTH_SHORT).show()
+                                                          loadDirectory(currentPath)
+                                                      } else {
+                                                          Toast.makeText(context, "Ошибка удаления", Toast.LENGTH_SHORT).show()
+                                                      }
+                                                  }
+                                              }) {
+                                                  Icon(Icons.Default.Delete, contentDescription = "Удалить")
                                               }
                                           }
                                       }
@@ -650,25 +711,43 @@ jobs:
                       }
 
                       if (isUploading) {
-                          Card(
-                              modifier = Modifier
-                                  .align(Alignment.BottomCenter)
-                                  .padding(16.dp)
-                                  .fillMaxWidth()
-                          ) {
-                              Column(
-                                  modifier = Modifier.padding(16.dp),
-                                  horizontalAlignment = Alignment.CenterHorizontally
-                              ) {
+                          Card(modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp).fillMaxWidth()) {
+                              Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                                   Text("Загрузка файла...")
                                   Spacer(modifier = Modifier.height(8.dp))
-                                  LinearProgressIndicator(
-                                      progress = { uploadProgress },
-                                      modifier = Modifier.fillMaxWidth()
-                                  )
+                                  LinearProgressIndicator(progress = { uploadProgress }, modifier = Modifier.fillMaxWidth())
                               }
                           }
                       }
+                  }
+
+                  if (showCreateDirDialog) {
+                      AlertDialog(
+                          onDismissRequest = { showCreateDirDialog = false },
+                          title = { Text("Новая папка") },
+                          text = {
+                              OutlinedTextField(
+                                  value = newDirName,
+                                  onValueChange = { newDirName = it },
+                                  label = { Text("Название папки") }
+                              )
+                          },
+                          confirmButton = {
+                              TextButton(onClick = {
+                                  if (newDirName.isNotEmpty()) {
+                                      scope.launch {
+                                          val success = ftpManager.createDirectory("$currentPath/$newDirName")
+                                          showCreateDirDialog = false
+                                          newDirName = ""
+                                          if (success) loadDirectory(currentPath) else Toast.makeText(context, "Ошибка создания папки", Toast.LENGTH_SHORT).show()
+                                      }
+                                  }
+                              }) { Text("Создать") }
+                          },
+                          dismissButton = {
+                              TextButton(onClick = { showCreateDirDialog = false }) { Text("Отмена") }
+                          }
+                      )
                   }
               }
           }
